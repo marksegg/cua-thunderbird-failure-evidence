@@ -112,15 +112,34 @@ still need to independently verify the diff claim. running an adversarial agent 
 
 ---
 
-## what i'm still checking
+## adversarial stress-test results
 
-i've launched 3 adversarial agents to stress-test these findings:
+ran 3 agents specifically to challenge my own claims. here's what they found:
 
-1. is d6896 actually a task ambiguity problem (instruction doesn't say "Local Folders") rather than a model error?
-2. same question for d6bfb
-3. independent re-verification of d689e -- are the mbox diffs really just metadata?
+### d6896: claim partially overturned
 
-will update this doc when those complete. not drawing final conclusions until then.
+the "genuine failure" label doesn't fully hold. two independent problems found:
+
+**task instruction is ambiguous.** step 7 says "Create a message filter called 'Vendor Invoice Routing'" but never says "under Local Folders." the passing task d6897 (Ironbridge) explicitly said "on the 'Local Folders'" and the model correctly switched accounts for that one. without that phrase, the model's IMAP placement is a defensible interpretation.
+
+**condition order is a verifier bug.** the instruction says "From contains 'billing@' AND Subject contains 'Invoice'" (From first). the model followed this exact order. but the verifier expects Subject first, From second. confirmed that `_match_record` does order-sensitive list equality. even if the model had the right account, it would still fail. the instruction and verifier contradict each other.
+
+bottom line: ~40% task design, ~30% verifier bug, ~30% model error. not a clean sample.
+
+### d6bfb: claim CONFIRMED genuine
+
+the challenge agent found this is actually stronger than i initially thought:
+
+- the instruction says "create a filter to move future invitations...to this folder" (Local Folders/Research). not ambiguous.
+- the Message Filters dialog **defaulted to Local Folders** (the correct answer). the model deliberately switched it to the IMAP account, reasoning "incoming mail filters should be applied there."
+- only 1 filter condition (`body contains "genome study"`), so no order issue.
+- similar tasks with explicit "Local Folders" instructions pass, proving the verifier works.
+
+one nuance worth flagging: in real thunderbird, IMAP account filters process incoming mail while Local Folders filters do not. the model's choice is arguably more functionally correct for "automatically moving future invitations." but within the evaluation framework, the model is wrong. the model overrode the correct default based on a heuristic that doesn't apply to this task setup.
+
+### d689e: waiting on re-verification
+
+agent still running. will update when complete.
 
 ---
 
