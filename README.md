@@ -1,117 +1,126 @@
-# thunderbird -- findings from rollout analysis
+# thunderbird rollout findings
 
 mark shi, 2026-04-06  
 instance: `synth-task-gen` / branch `manasi/debug-eval`  
-ubuntu, screenshot-only, opus 4.6, max_steps=300, debug_eval
+ubuntu, screenshot-only, opus 4.6, max_steps=300
 
 ---
 
-## summary
+## what i ran
 
-ran rollouts on 3 thunderbird tasks: d689e (5 runs), d6896 (4 runs), d6bfb (3 runs). found **one genuine model failure pattern** and **one gold file / verifier issue**.
+5 rollouts on d689e, 4 on d6896, 3 on d6bfb. all thunderbird email client tasks. rollout process died partway through (server contention with other experiments) but got enough data for the top candidates.
 
-**genuine failure (d6896, d6bfb):** model creates message filters under the wrong thunderbird account (IMAP instead of Local Folders). subtle UI context error -- model doesn't check the "Filters for:" dropdown. consistent across all runs.
+## results at a glance
 
-**gold file issue (d689e):** model actually completes all 7 subproblems correctly, but compare_text_file fails because gold files have wrong mbox envelope timestamps and non-deterministic X-Mozilla-Status2 flags. same class of problem as the pptx text-run-splitting bug.
+| task | runs | pass | failing check | passing checks |
+|------|------|------|---------------|----------------|
+| d6896 (vendor mgmt) | 4 | 0 | check_thunderbird_filter | check_list, file_contains x2, check_thunderbird_prefs |
+| d6bfb (genome study) | 3 | 0 | check_thunderbird_filter | file_contains |
+| d689e (HR/admin) | 5 | 0 | compare_text_file x3 | run_sqlite3, check_thunderbird_filter, check_thunderbird_prefs |
 
----
-
-## results
-
-| task | subprobs | runs | pass | verdict | failing metric |
-|------|----------|------|------|---------|----------------|
-| d6896 (Vendor management) | 8 | 4 | 0 | **GENUINE failure** | check_thunderbird_filter |
-| d6bfb (Genome study) | 6 | 3 | 0 | **GENUINE failure** | check_thunderbird_filter |
-| d689e (HR/Admin cleanup) | 7 | 5 | 0 | gold file bug | compare_text_file x3 |
+every task has some metrics that pass, some that fail. the pattern is identical across all runs for each task.
 
 ---
 
-## d6896 -- filter created under wrong thunderbird account
+## d6896: filter under wrong thunderbird account
 
-**task:** create folder structure (Vendor Management > Invoices, Renewals), move 3 specific emails to correct subfolders, create message filter "Vendor Invoice Routing" with conditions From contains "billing@" AND Subject contains "Invoice", change compose format to plain text.
+8 subproblems. model completes 7 correctly. fails on the message filter.
 
-**what the model gets right (4/5 verifier checks pass):**
-- folder structure created correctly under Local Folders (check_list=1.0)
-- all 3 emails moved to correct folders (file_contains=1.0 x2)
-- compose format changed to plain text (check_thunderbird_prefs=1.0)
+the task asks the model to create folders under Local Folders, move emails there, create a filter that routes future emails to those folders, and change the compose format.
 
-**what the model gets wrong:**
-the model opens Tools > Message Filters while the IMAP inbox is selected. the "Filters for:" dropdown at the top of the dialog defaults to the IMAP account (`rachel.dominguez@conduitcloud.com`). the model doesn't notice or change this to "Local Folders".
+what the model does: opens Tools > Message Filters. the "Filters for:" dropdown at the top defaults to the IMAP account. the model either doesn't notice or rationalizes it as correct. creates the filter under the IMAP account instead of Local Folders.
 
-the filter gets saved to the IMAP account's msgFilterRules.dat. the verifier checks `Mail/Local Folders/msgFilterRules.dat`, which is empty. result: check_thunderbird_filter=0.0.
+in run_1, the model actually SAW the dropdown and said "the Filters for dropdown is showing rachel.dominguez@conduitcloud.com" but decided that was the right account. runs 2-4 didn't even mention it.
 
-this is a subtle UI context error. the model correctly configures the filter name, conditions, and action, but puts it in the wrong place because it doesn't check which account is active in the dialog.
+the filter itself is correctly configured (name, conditions, action). it's just in the wrong place.
 
-**screenshot -- filter dialog showing wrong account at top:**
+### the filter dialog -- note the account dropdown at top
 
-*(see screenshots/d6896_run1_filter_creation.png)*
+![d6896 filter creation](https://raw.githubusercontent.com/marksegg/cua-thunderbird-failure-evidence/main/screenshots/d6896_run1_filter_creation.png)
 
-**consistency across runs:**
+### model navigating the task
+
+![d6896 mid-task](https://raw.githubusercontent.com/marksegg/cua-thunderbird-failure-evidence/main/screenshots/d6896_run1_mid.png)
+
+### verifier scores (identical across 4 runs)
+
 ```
-run_1: check_list=1.0, file_contains=1.0, file_contains=1.0, check_thunderbird_filter=0.0, check_thunderbird_prefs=1.0
-run_2: check_list=1.0, file_contains=1.0, file_contains=1.0, check_thunderbird_filter=0.0, check_thunderbird_prefs=1.0
-run_3: check_list=1.0, file_contains=1.0, file_contains=1.0, check_thunderbird_filter=0.0, check_thunderbird_prefs=1.0
-run_4: check_list=1.0, file_contains=1.0, file_contains=1.0, check_thunderbird_filter=0.0, check_thunderbird_prefs=1.0
+check_list (folder structure):      1.0
+file_contains (emails in Invoices): 1.0
+file_contains (emails in Renewals): 1.0
+check_thunderbird_filter:           0.0  <-- filter not found in Local Folders
+check_thunderbird_prefs:            1.0
 ```
 
-all 4 runs fail the exact same way. 64-68 steps per run.
+### open questions i'm still investigating
+
+- the task instruction says "create a message filter called 'Vendor Invoice Routing'" but doesn't explicitly say "under Local Folders." is the model's interpretation defensible?
+- in thunderbird, a filter under an IMAP account CAN move emails to Local Folders. so functionally the model's filter might work. the verifier just checks a specific file path.
+- the verifier also expects conditions in a specific order (Subject first, From second) but the task instruction lists From first. the model follows the instruction order. is that a verifier strictness issue or a model error?
+- similar task d6897 (Ironbridge) passed 1.0. need to check if that task's filter was also supposed to be under Local Folders.
 
 ---
 
-## d689e -- GOLD FILE BUG (model actually succeeds)
+## d6bfb: same filter-account pattern
 
-**task:** create HR & Admin > Policies, Onboarding folders. move 3 specific emails to correct subfolders and mark unread. star the CLE credits email. create filter "HR Policy Updates". add Derek Morrison to address book. set mailnews.send.warn_on_ctrl_enter to false.
+6 subproblems. email move works (file_contains=1.0). filter fails (check_thunderbird_filter=0.0).
 
-**verifier results (all 5 runs identical):**
+model created the filter under `dr.carter@genomictechinnovations.com` account instead of Local Folders. same root cause as d6896. the model used "Body contains genome study" as the condition.
+
+the msgFilterRules.dat at the verifier's expected path is 25 bytes (empty header).
+
+same open questions apply: is the instruction clear about where the filter should go?
+
+---
+
+## d689e: model might actually succeed here
+
+7 subproblems. the 3 state-based verifiers (sqlite, filter, prefs) all pass. the 3 compare_text_file checks (mbox folder files) all fail.
+
+a deep byte-level comparison of the model's mbox files vs gold found that the content differences are:
+- `From -` envelope timestamps (thunderbird uses wall-clock time on email move, gold has original dates)
+- `X-Mozilla-Status2` flags (non-deterministic internal thunderbird metadata)
+
+the actual emails appear to be in the right folders. the star appears to be applied. the model seems to have done everything correctly.
+
+### model working on email operations
+
+![d689e mid-task](https://raw.githubusercontent.com/marksegg/cua-thunderbird-failure-evidence/main/screenshots/d689e_run1_mid.png)
+
+### thunderbird startup
+
+![d689e start](https://raw.githubusercontent.com/marksegg/cua-thunderbird-failure-evidence/main/screenshots/d689e_run1_first.png)
+
+### verifier scores (identical across 5 runs)
+
 ```
-compare_text_file (Policies) = 0.0    compare_text_file (Onboarding) = 0.0
-compare_text_file (Inbox) = 0.0       run_sqlite3 = 1.0
-check_thunderbird_filter = 1.0        check_thunderbird_prefs = 1.0
+compare_text_file (Policies folder): 0.0  <-- mbox metadata mismatch
+compare_text_file (Onboarding):      0.0  <-- mbox metadata mismatch
+compare_text_file (Inbox):           0.0  <-- mbox metadata mismatch
+run_sqlite3:                         1.0
+check_thunderbird_filter:            1.0
+check_thunderbird_prefs:             1.0
 ```
 
-**initially looked like an email handling failure.** but byte-level mbox comparison revealed the model completed ALL 7 subproblems correctly:
-- emails moved to correct folders (confirmed by X-Mozilla-Status: 0009/0008 ghosts in Inbox)
-- moved emails marked as unread
-- CLE email starred and left as read (X-Mozilla-Status: 0005 = Read + Starred, matches gold)
-- filter, address book, preference all correct
+this looks like the same class of issue as the pptx text-run-splitting bug: gold files weren't generated through the actual evaluation pipeline, so internal application metadata doesn't match.
 
-the compare_text_file failures come from two mbox metadata artifacts:
+one wrinkle: Judah's earlier run (with screenshot+a11y_tree) showed the model mis-clicking the star icon. our screenshot-only runs don't show that. model behavior varies by observation type.
 
-1. **envelope timestamps:** thunderbird rewrites the `From -` line with wall-clock time on move. gold has original dates (`From - Sun Feb 18 00:00:00 2024`), model output has move-time dates (`From - Mon Apr 06 19:34:09 2026`).
+### open question
 
-2. **X-Mozilla-Status2 flags:** non-deterministic internal thunderbird flag. gold has inconsistent expectations across folders.
-
-same class of issue as pptx text-run-splitting. gold files weren't generated through the actual pipeline.
-
-**note:** Judah's earlier a11y_tree run had a real mis-click on the star icon. our screenshot-only runs do NOT -- model clicks correctly. behavior differs by observation type.
-
-**recommendation:** regenerate gold files, or add mbox-aware options to compare_text_file.
+still need to independently verify the diff claim. running an adversarial agent to re-check whether the ONLY differences are truly metadata, or if there are actual content errors i missed.
 
 ---
 
-## why d6896/d6bfb are genuine failures
+## what i'm still checking
 
-1. **multiple metrics pass on every run.** 4/5 metrics pass for d6896. the verifiers work.
+i've launched 3 adversarial agents to stress-test these findings:
 
-2. **the specific model error is identifiable in trajectories and screenshots.** the "Filters for:" dropdown shows the IMAP account. the model never changes it. the filter goes to the wrong place.
+1. is d6896 actually a task ambiguity problem (instruction doesn't say "Local Folders") rather than a model error?
+2. same question for d6bfb
+3. independent re-verification of d689e -- are the mbox diffs really just metadata?
 
-3. **failures are perfectly consistent across all runs.** 4/4 d6896 runs, 3/3 d6bfb runs fail the exact same way.
-
-4. **the model claims success.** declares all tasks done, doesn't notice the filter is under the wrong account. classic "agent thinks it succeeded but made a subtle error."
-
-5. **similar tasks DO pass.** d6897 (Ironbridge) passed 1.0 in Judah's data using the same verifiers. the task is solvable.
-
-## why d689e is NOT a genuine failure
-
-the compare_text_file check does a literal string match on mbox files. thunderbird's internal metadata (envelope timestamps, Status2 flags) changes non-deterministically. the gold files were constructed with metadata that doesn't match what thunderbird produces during a real operation. the model does the work correctly.
-
----
-
-## solvability
-
-**d6896:** Judah's earlier data shows a structurally similar task (d6897, "Ironbridge delivery confirmations") that **passed with score 1.0** using the same verifier functions. this proves the check_thunderbird_filter verifier works when the filter is created correctly. the task is solvable.
-
-**d689e:** similar task (d6895, "Globex Corp deal pipeline") also **passed with 1.0** in Judah's data using even more verifier functions (5 metrics). the email-handling tasks are solvable when the model clicks correctly.
+will update this doc when those complete. not drawing final conclusions until then.
 
 ---
 
@@ -122,7 +131,6 @@ ssh synth-task-gen
 cd /home/ec2-user/scale-cua-env-testing/scale-cua/scale-cua-environments
 source venv/bin/activate
 
-# check verifier details for any run
 python3 -c "
 import json
 for task, run in [('69bb15eeb46c7fadbf006896', '1'), ('69bb15eeb46c7fadbf00689e', '1')]:
