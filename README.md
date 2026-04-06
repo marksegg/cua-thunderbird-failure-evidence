@@ -6,16 +6,28 @@ ubuntu, screenshot-only, opus 4.6, max_steps=300
 
 ---
 
+## bottom line (after adversarial stress-testing)
+
+ran rollouts, analyzed results, then launched 3 adversarial agents to challenge my own conclusions. here's where things actually landed:
+
+| task | runs | initial call | after stress-test | honest verdict |
+|------|------|-------------|-------------------|----------------|
+| d6bfb (genome study) | 3 | genuine failure | **confirmed** | model overrode correct default. cleanest sample we have |
+| d6896 (vendor mgmt) | 4 | genuine failure | **partially overturned** | instruction ambiguous + verifier condition-order bug |
+| d689e (HR/admin) | 5 | gold file bug | **confirmed** | model succeeds, mbox metadata mismatch |
+
+**one clean genuine failure (d6bfb)**, one messy mixed-blame case (d6896), one gold file bug (d689e). not as many genuine failures as i hoped to find.
+
 ## what i ran
 
-5 rollouts on d689e, 4 on d6896, 3 on d6bfb. all thunderbird email client tasks. rollout process died partway through (server contention with other experiments) but got enough data for the top candidates.
+5 rollouts on d689e, 4 on d6896, 3 on d6bfb. all thunderbird email client tasks. rollout process died partway through (server contention) but got enough data for the top candidates.
 
-## results at a glance
+## verifier results at a glance
 
 | task | runs | pass | failing check | passing checks |
 |------|------|------|---------------|----------------|
-| d6896 (vendor mgmt) | 4 | 0 | check_thunderbird_filter | check_list, file_contains x2, check_thunderbird_prefs |
 | d6bfb (genome study) | 3 | 0 | check_thunderbird_filter | file_contains |
+| d6896 (vendor mgmt) | 4 | 0 | check_thunderbird_filter | check_list, file_contains x2, check_thunderbird_prefs |
 | d689e (HR/admin) | 5 | 0 | compare_text_file x3 | run_sqlite3, check_thunderbird_filter, check_thunderbird_prefs |
 
 every task has some metrics that pass, some that fail. the pattern is identical across all runs for each task.
@@ -137,9 +149,17 @@ the challenge agent found this is actually stronger than i initially thought:
 
 one nuance worth flagging: in real thunderbird, IMAP account filters process incoming mail while Local Folders filters do not. the model's choice is arguably more functionally correct for "automatically moving future invitations." but within the evaluation framework, the model is wrong. the model overrode the correct default based on a heuristic that doesn't apply to this task setup.
 
-### d689e: waiting on re-verification
+### d689e: CONFIRMED gold file bug
 
-agent still running. will update when complete.
+independent re-verification found:
+- the model completed all 7 subproblems correctly. 98 steps, no errors or misclicks.
+- CLE email correctly starred (X-Mozilla-Status: 0005 = Read + Starred, matches gold exactly)
+- right emails moved to right folders, marked unread
+- filter, address book, preference all correct
+- the ONLY diffs in the 3 failing mbox comparisons are `From -` envelope timestamps (runtime vs gold construction time) and `X-Mozilla-Status2` internal flags
+- `run_sqlite3` passed 1.0, independently confirming the address book entry (not the star though, contrary to earlier assumption)
+
+true score should be 1.0. the 0.0 is from `compare_text_file` doing naive string equality on files that contain non-deterministic thunderbird metadata.
 
 ---
 
