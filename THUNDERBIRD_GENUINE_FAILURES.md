@@ -1,4 +1,4 @@
-# thunderbird -- genuine model failures found
+# thunderbird -- findings from rollout analysis
 
 mark shi, 2026-04-06  
 instance: `synth-task-gen` / branch `manasi/debug-eval`  
@@ -8,19 +8,21 @@ ubuntu, screenshot-only, opus 4.6, max_steps=300, debug_eval
 
 ## summary
 
-ran 5 rollouts on d689e and 4 on d6896 (thunderbird email client tasks). both show **consistent genuine model failures** with specific, identifiable error patterns. unlike pptx where every failure was a verifier bug, thunderbird verifiers check actual application state and the failures are real.
+ran rollouts on 3 thunderbird tasks: d689e (5 runs), d6896 (4 runs), d6bfb (3 runs). found **one genuine model failure pattern** and **one gold file / verifier issue**.
 
-both tasks have multiple verifier metrics where some PASS and some FAIL, confirming the verifiers work correctly and the failures are on specific subproblems.
+**genuine failure (d6896, d6bfb):** model creates message filters under the wrong thunderbird account (IMAP instead of Local Folders). subtle UI context error -- model doesn't check the "Filters for:" dropdown. consistent across all runs.
+
+**gold file issue (d689e):** model actually completes all 7 subproblems correctly, but compare_text_file fails because gold files have wrong mbox envelope timestamps and non-deterministic X-Mozilla-Status2 flags. same class of problem as the pptx text-run-splitting bug.
 
 ---
 
 ## results
 
-| task | subprobs | runs | pass | failing metric | passing metrics |
-|------|----------|------|------|----------------|-----------------|
-| d689e (HR/Admin cleanup) | 7 | 5 | 0 | compare_text_file x3 | run_sqlite3, check_thunderbird_filter, check_thunderbird_prefs |
-| d6896 (Vendor management) | 8 | 4 | 0 | check_thunderbird_filter | check_list, file_contains x2, check_thunderbird_prefs |
-| d6bfb (Genome study) | 6 | 3 | 0 | check_thunderbird_filter | file_contains |
+| task | subprobs | runs | pass | verdict | failing metric |
+|------|----------|------|------|---------|----------------|
+| d6896 (Vendor management) | 8 | 4 | 0 | **GENUINE failure** | check_thunderbird_filter |
+| d6bfb (Genome study) | 6 | 3 | 0 | **GENUINE failure** | check_thunderbird_filter |
+| d689e (HR/Admin cleanup) | 7 | 5 | 0 | gold file bug | compare_text_file x3 |
 
 ---
 
@@ -56,50 +58,52 @@ all 4 runs fail the exact same way. 64-68 steps per run.
 
 ---
 
-## d689e -- email handling failures
+## d689e -- GOLD FILE BUG (model actually succeeds)
 
 **task:** create HR & Admin > Policies, Onboarding folders. move 3 specific emails to correct subfolders and mark unread. star the CLE credits email. create filter "HR Policy Updates". add Derek Morrison to address book. set mailnews.send.warn_on_ctrl_enter to false.
 
-**what the model gets right (3/6 verifier checks pass):**
-- filter created correctly for rachel.nguyen@cbhlaw.com account (check_thunderbird_filter=1.0)
-- address book contact added, email starring/unread flags correct in sqlite (run_sqlite3=1.0)
-- preference set correctly in config editor (check_thunderbird_prefs=1.0)
-
-**what the model gets wrong:**
-the compare_text_file checks for Policies, Onboarding, and Inbox mbox files all fail. the model's email file contents don't match the gold files. this indicates problems with how the emails were moved between folders.
-
-from Judah's earlier single-rollout analysis (using screenshot+a11y_tree), the root cause was: the model mis-clicked when trying to star the CLE credits email (clicked in the subject column at x=651 instead of the star column at x~180). a context menu appeared. **the model then hallucinated that the star was applied** ("The Karen O'Shea email is now starred") and moved on. the missing star flag changed the X-Mozilla-Status header in the Inbox mbox file, causing the compare_text_file check to fail.
-
-in our screenshot-only runs, the failure pattern is identical across all 5 runs: all 3 compare_text_file metrics fail, but the 3 state-based checks pass.
-
-**screenshot -- model working on email operations (mid-task):**
-
-*(see screenshots/d689e_run1_mid.png -- shows folder structure created, inbox emails visible)*
-
-**consistency across runs:**
+**verifier results (all 5 runs identical):**
 ```
-run_1: cmp=0.0, cmp=0.0, cmp=0.0, sqlite=1.0, filter=1.0, prefs=1.0
-run_2: cmp=0.0, cmp=0.0, cmp=0.0, sqlite=1.0, filter=1.0, prefs=1.0
-run_3: cmp=0.0, cmp=0.0, cmp=0.0, sqlite=1.0, filter=1.0, prefs=1.0
-run_4: cmp=0.0, cmp=0.0, cmp=0.0, sqlite=1.0, filter=1.0, prefs=1.0
-run_5: cmp=0.0, cmp=0.0, cmp=0.0, sqlite=1.0, filter=1.0, prefs=1.0
+compare_text_file (Policies) = 0.0    compare_text_file (Onboarding) = 0.0
+compare_text_file (Inbox) = 0.0       run_sqlite3 = 1.0
+check_thunderbird_filter = 1.0        check_thunderbird_prefs = 1.0
 ```
 
-all 5 runs fail the exact same way. 98-103 steps per run.
+**initially looked like an email handling failure.** but byte-level mbox comparison revealed the model completed ALL 7 subproblems correctly:
+- emails moved to correct folders (confirmed by X-Mozilla-Status: 0009/0008 ghosts in Inbox)
+- moved emails marked as unread
+- CLE email starred and left as read (X-Mozilla-Status: 0005 = Read + Starred, matches gold)
+- filter, address book, preference all correct
+
+the compare_text_file failures come from two mbox metadata artifacts:
+
+1. **envelope timestamps:** thunderbird rewrites the `From -` line with wall-clock time on move. gold has original dates (`From - Sun Feb 18 00:00:00 2024`), model output has move-time dates (`From - Mon Apr 06 19:34:09 2026`).
+
+2. **X-Mozilla-Status2 flags:** non-deterministic internal thunderbird flag. gold has inconsistent expectations across folders.
+
+same class of issue as pptx text-run-splitting. gold files weren't generated through the actual pipeline.
+
+**note:** Judah's earlier a11y_tree run had a real mis-click on the star icon. our screenshot-only runs do NOT -- model clicks correctly. behavior differs by observation type.
+
+**recommendation:** regenerate gold files, or add mbox-aware options to compare_text_file.
 
 ---
 
-## why these are genuine failures (not verifier bugs)
+## why d6896/d6bfb are genuine failures
 
-1. **multiple metrics pass on every run.** the verifiers demonstrably work. if this were a verifier bug, we'd see 0/6 or 0/5 metrics failing, not a specific subset.
+1. **multiple metrics pass on every run.** 4/5 metrics pass for d6896. the verifiers work.
 
-2. **failures are on different subproblems for different tasks.** d6896 fails on the filter, d689e fails on email handling. the verifiers catch different types of model errors.
+2. **the specific model error is identifiable in trajectories and screenshots.** the "Filters for:" dropdown shows the IMAP account. the model never changes it. the filter goes to the wrong place.
 
-3. **failures are perfectly consistent across runs.** all 4 d6896 runs and all 5 d689e runs show the exact same pass/fail pattern. this rules out random environment issues.
+3. **failures are perfectly consistent across all runs.** 4/4 d6896 runs, 3/3 d6bfb runs fail the exact same way.
 
-4. **the specific model errors are identifiable in trajectories.** d6896: model doesn't change the "Filters for:" dropdown. d689e: model mis-clicks the star icon and hallucinates success.
+4. **the model claims success.** declares all tasks done, doesn't notice the filter is under the wrong account. classic "agent thinks it succeeded but made a subtle error."
 
-5. **the model claims success in both cases.** classic "agent thinks it completed the task but made a subtle error" pattern -- exactly the failure mode PKJA is looking for.
+5. **similar tasks DO pass.** d6897 (Ironbridge) passed 1.0 in Judah's data using the same verifiers. the task is solvable.
+
+## why d689e is NOT a genuine failure
+
+the compare_text_file check does a literal string match on mbox files. thunderbird's internal metadata (envelope timestamps, Status2 flags) changes non-deterministically. the gold files were constructed with metadata that doesn't match what thunderbird produces during a real operation. the model does the work correctly.
 
 ---
 
